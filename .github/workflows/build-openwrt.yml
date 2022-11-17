@@ -53,18 +53,13 @@ jobs:
         sudo ln -fs /usr/share/zoneinfo/$TZ /etc/localtime
         sudo dpkg-reconfigure -f noninteractive tzdata
         ' &
-        echo "DEVICE_NAME=${{ matrix.CONFIG_NAME }}" >> $GITHUB_ENV
-        echo "FILE_DATE=$(date +"%Y-%m-%d")" >> $GITHUB_ENV
-        export SOURCE_USER=$(awk -F/ '{print $(NF-1)}' <<< $SOURCE_URL)
-        export SOURCE_NAME=$(awk -F/ '{print $(NF)}' <<< $SOURCE_URL)
-        export -p
-        echo "SOURCE_USER=$SOURCE_USER" >> $GITHUB_ENV
-        echo "SOURCE_NAME=$SOURCE_NAME" >> $GITHUB_ENV
+        export FILE_DATE=$(date +"%Y-%m-%d")
+        export DEVICE_NAME=${{ matrix.CONFIG_NAME }}
+        export SOURCE_NAME=$(awk -F/ '{print $(NF)}' <<<$SOURCE_URL)
+        export SOURCE_USER=$(awk -F/ '{print $(NF-1)}' <<<$SOURCE_URL)
         export TOOLCHAIN_TAG=$SOURCE_USER-$TOOLCHAIN_TAG
-        echo "TOOLCHAIN_TAG=$SOURCE_USER-$TOOLCHAIN_TAG" >> $GITHUB_ENV
         export TARGET_INFO=$SOURCE_USER-$SOURCE_NAME-$SOURCE_BRANCH
-        echo "TARGET_INFO=$SOURCE_USER-$SOURCE_NAME-$SOURCE_BRANCH" >> $GITHUB_ENV
-        echo "DOWNLOAD_URL=$GITHUB_SERVER_URL/hong0980/OpenWrt-Toolchain-Cache/releases/download/$TOOLCHAIN_TAG/$TARGET_INFO" >> $GITHUB_ENV
+        export DOWNLOAD_URL=$GITHUB_SERVER_URL/hong0980/OpenWrt-Toolchain-Cache/releases/download/$TOOLCHAIN_TAG/$TARGET_INFO
 
     - name: 整理磁盘
       run: |
@@ -112,6 +107,7 @@ jobs:
         echo "CACHE_TOOLS_HASH is $CACHE_TOOLS_HASH"
         if [ -z "$CACHE_TOOLS_HASH" ] || [ "$CURRENT_TOOLS_HASH" == "$CACHE_TOOLS_HASH" ]; then
           echo "SKIP_TOOLS=true" >> $GITHUB_OUTPUT
+          echo "CURRENT_TOOLS_HASH = CACHE_TOOLS_HASH"
         else
           echo "CURRENT_TOOLS_HASH != CACHE_TOOLS_HASH"
         fi
@@ -123,13 +119,13 @@ jobs:
         export CURRENT_TOOLCHAIN_HASH=$(curl -fsSL \
           $GITHUB_API_URL/repos/$SOURCE_USER/$SOURCE_NAME/commits\?sha\=$SOURCE_BRANCH\&path\=toolchain | jq -r '.[0] | .sha')
         echo "CURRENT_TOOLCHAIN_HASH is $CURRENT_TOOLCHAIN_HASH"
-        echo "CURRENT_TOOLCHAIN_HASH=$CURRENT_TOOLCHAIN_HASH" >> $GITHUB_ENV
         export CACHE_TOOLCHAIN_HASH=$(curl -fSsL ${DOWNLOAD_URL}-cache-toolchain-hash.txt 2>/dev/null)
         echo "CACHE_TOOLCHAIN_HASH is $CACHE_TOOLCHAIN_HASH"
         if [ -z "$CACHE_TOOLCHAIN_HASH" ] || [ "$CURRENT_TOOLCHAIN_HASH" == "$CACHE_TOOLCHAIN_HASH" ]; then
           echo "SKIP_TOOLCHAIN=true" >> $GITHUB_OUTPUT
+          echo "CURRENT_TOOLCHAIN_HASH = CACHE_TOOLCHAIN_HASH"
         else
-          echo "CURRENT_TOOLS_HASH != CACHE_TOOLS_HASH"
+          echo "CURRENT_TOOLCHAIN_HASH != CACHE_TOOLCHAIN_HASH"
         fi
 
     - name: 拉取源码
@@ -139,11 +135,11 @@ jobs:
         cd $GITHUB_WORKSPACE
         git clone -q $CONFIG_URL -b $CONFIG_BRANCH openwrt-config --single-branch
         cd openwrt-config
-        echo "CONFIGROOT=$PWD" >> $GITHUB_ENV
+        export CONFIGROOT=$PWD
         cd $GITHUB_WORKSPACE
         git clone -q $SOURCE_URL -b $SOURCE_BRANCH openwrt --single-branch
         cd openwrt
-        echo "OPENWRTROOT=$PWD" >> $GITHUB_ENV
+        export OPENWRTROOT=$PWD
 
     - name: 更新 Feeds
       id: update_feeds
@@ -175,12 +171,12 @@ jobs:
         cp $CONFIGROOT/"$DEVICE_NAME".config .config || exit 1
         sed -i '/CONFIG_DEVEL/d;/CONFIG_AUTOREMOVE/d;/CONFIG_CCACHE/d;/CONFIG_BUILD_LOG/d' .config
         echo -e "\nCONFIG_DEVEL=y\nCONFIG_AUTOREMOVE=y\nCONFIG_CCACHE=y\nCONFIG_BUILD_LOG=y\nCONFIG_BUILD_LOG_DIR=\"./logs\"" >> .config
-        echo "DEVICE_TARGET=$(awk -F_ '/^CON.*_DEVICE_.*=y/{print $3}' .config)" >> $GITHUB_ENV
-        echo "DEVICE_SUBTARGET=$(awk -F_ '/^CON.*_DEVICE_.*=y/{print $4}' .config)" >> $GITHUB_ENV
+        export DEVICE_TARGET=$(awk -F_ '/^CON.*_DEVICE_.*=y/{print $3}' .config)
+        export DEVICE_SUBTARGET=$(awk -F_ '/^CON.*_DEVICE_.*=y/{print $4}' .config)
         make defconfig
-        echo "DEVICE_ARCH=$(awk -F\" '/^CONFIG_ARCH=.*/{print $2}' .config)" >> $GITHUB_ENV
-        echo "DEVICE_ARCH_PACKAGES=$(awk -F\" '/^CON.*AGES=".*/{print $2}' .config)" >> $GITHUB_ENV
-        echo "DEVICE=$DEVICE_TARGET-$DEVICE_SUBTARGET" >> $GITHUB_ENV
+        export DEVICE_ARCH=$(awk -F\" '/^CONFIG_ARCH=.*/{print $2}' .config)
+        export DEVICE_ARCH_PACKAGES=$(awk -F\" '/^CON.*AGES=".*/{print $2}' .config)
+        export DEVICE=$DEVICE_TARGET-$DEVICE_SUBTARGET
 
     - name: 下载 package
       id: download
@@ -197,9 +193,9 @@ jobs:
       run: |
         cd $OPENWRTROOT
         rm -rf build_dir staging_dir
-        wget -c -t=3 ${DOWNLOAD_URL}-prebuild-tools.img
-        ./scripts/ext-tools.sh --tools *-prebuild-tools.img
-        rm *-prebuild-tools.img
+        wget -qc -t=3 ${DOWNLOAD_URL}-prebuild-tools.tar.xz
+        ./scripts/ext-tools.sh --tools *-prebuild-tools.tar.xz
+        rm *.tar.xz
 
     - name: 修改文件
       id: modify
@@ -278,7 +274,7 @@ jobs:
         cd $OPENWRTROOT/bin/targets/*/*
         rm -rf packages
         rm *.buildinfo *sums
-        echo "FIRMWARE=$PWD" >> $GITHUB_ENV
+        export FIRMWARE=$PWD
 
     - name: 上传固件目录
       uses: actions/upload-artifact@v3
