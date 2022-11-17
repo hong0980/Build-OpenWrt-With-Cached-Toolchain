@@ -61,6 +61,7 @@ jobs:
         echo "SOURCE_NAME=$SOURCE_NAME" >> $GITHUB_ENV
         echo "TOOLCHAIN_TAG=$SOURCE_USER-$TOOLCHAIN_TAG" >> $GITHUB_ENV
         echo "TARGET_INFO=$SOURCE_USER-$SOURCE_NAME-$SOURCE_BRANCH" >> $GITHUB_ENV
+        echo "DOWNLOAD_URL=$GITHUB_SERVER_URL/hong0980/OpenWrt-Toolchain-Cache/releases/download/$TOOLCHAIN_TAG/$TARGET_INFO" >> $GITHUB_ENV
 
     - name: 整理磁盘
       run: |
@@ -103,13 +104,13 @@ jobs:
       run: |
         export CURRENT_TOOLS_HASH=$(curl -fsSL \
           $GITHUB_API_URL/repos/$SOURCE_USER/$SOURCE_NAME/commits\?sha\=$SOURCE_BRANCH\&path\=tools | jq -r '.[0] | .sha')
-        echo "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/download/$TOOLCHAIN_TAG/${TARGET_INFO}-cache-tools-hash.txt"
-        export CACHE_TOOLS_HASH=$(curl -fSsL \
-          $GITHUB_SERVER_URL/hong0980/OpenWrt-Toolchain-Cache/releases/download/$TOOLCHAIN_TAG/${TARGET_INFO}-cache-tools-hash.txt 2>/dev/null)
+        echo "CURRENT_TOOLS_HASH is $CURRENT_TOOLS_HASH"
+        export CACHE_TOOLS_HASH=$(curl -fSsL ${DOWNLOAD_URL}-cache-tools-hash.txt 2>/dev/null)
+        echo "CACHE_TOOLS_HASH is $CACHE_TOOLS_HASH"
         if [ -z "$CACHE_TOOLS_HASH" ] || [ "$CURRENT_TOOLS_HASH" == "$CACHE_TOOLS_HASH" ]; then
           echo "SKIP_TOOLS=true" >> $GITHUB_OUTPUT
         else
-          echo "CURRENT_TOOLS_HASH = CACHE_TOOLS_HASH"
+          echo "CURRENT_TOOLS_HASH != CACHE_TOOLS_HASH"
         fi
 
     - name: 比较 Toolchain
@@ -118,14 +119,14 @@ jobs:
       run: |
         export CURRENT_TOOLCHAIN_HASH=$(curl -fsSL \
           $GITHUB_API_URL/repos/$SOURCE_USER/$SOURCE_NAME/commits\?sha\=$SOURCE_BRANCH\&path\=toolchain | jq -r '.[0] | .sha')
-        echo "CURRENT_TOOLCHAIN_HASH=$CURRENT_TOOLCHAIN_HASH" >> $GITHUB_ENV
         echo "CURRENT_TOOLCHAIN_HASH is $CURRENT_TOOLCHAIN_HASH"
-        echo "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/download/$TOOLCHAIN_TAG/$TARGET_INFO-cache-toolchain-hash.txt"
-        export CACHE_TOOLCHAIN_HASH=$(curl -fSsL \
-          $GITHUB_SERVER_URL/hong0980/OpenWrt-Toolchain-Cache/releases/download/$TOOLCHAIN_TAG/${TARGET_INFO}-cache-toolchain-hash.txt 2>/dev/null)
+        echo "CURRENT_TOOLCHAIN_HASH=$CURRENT_TOOLCHAIN_HASH" >> $GITHUB_ENV
+        export CACHE_TOOLCHAIN_HASH=$(curl -fSsL ${DOWNLOAD_URL}-cache-toolchain-hash.txt 2>/dev/null)
         echo "CACHE_TOOLCHAIN_HASH is $CACHE_TOOLCHAIN_HASH"
         if [ -z "$CACHE_TOOLCHAIN_HASH" ] || [ "$CURRENT_TOOLCHAIN_HASH" == "$CACHE_TOOLCHAIN_HASH" ]; then
           echo "SKIP_TOOLCHAIN=true" >> $GITHUB_OUTPUT
+        else
+          echo "CURRENT_TOOLS_HASH != CACHE_TOOLS_HASH"
         fi
 
     - name: 拉取源码
@@ -193,7 +194,7 @@ jobs:
       run: |
         cd $OPENWRTROOT
         rm -rf build_dir staging_dir
-        wget -c -t=3 $GITHUB_SERVER_URL/hong0980/OpenWrt-Toolchain-Cache/releases/download/$TOOLCHAIN_TAG/$TARGET_INFO-prebuild-tools.img
+        wget -c -t=3 ${DOWNLOAD_URL}-prebuild-tools.img
         ./scripts/ext-tools.sh --tools *-prebuild-tools.img
         rm *-prebuild-tools.img
 
@@ -214,7 +215,7 @@ jobs:
       if: steps.modify.conclusion == 'success' && !cancelled()
       run: |
         cd $OPENWRTROOT
-        curl -L --retry 3 $GITHUB_SERVER_URL/OpenWrt-Toolchain-Cache/releases/download/$TOOLCHAIN_TAG/$TARGET_INFO-$DEVICE-toolchain.tar.bz2 | tar -xj
+        curl -L --retry 3 ${DOWNLOAD_URL}-$DEVICE-toolchain.tar.bz2 | tar -xj
         cd $(ls -d */ | grep openwrt-toolchain-) && cd $(ls -d */ | grep toolchain-) && TOOLCHAIN_DIR=$(pwd)
         cd $OPENWRTROOT
         echo "toolchain floder is $TOOLCHAIN_DIR"
