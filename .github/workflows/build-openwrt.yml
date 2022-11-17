@@ -1,0 +1,293 @@
+name: Build OpenWrt With Cached Toolchain
+
+on:
+  repository_dispatch:
+  workflow_dispatch:
+    inputs:
+      release:
+        description: 'upload firmware to release [true/false]'
+        required: false
+        default: 'true'
+      release_note:
+        description: 'release note'
+        required: false
+        default: 'update'
+
+env:
+  SOURCE_URL: https://github.com/coolsnowwolf/lede
+  SOURCE_BRANCH: master
+  CONFIG_URL: https://github.com/hong0980/openwrt-config
+  CONFIG_BRANCH: lean-lede
+  TOOLCHAIN_PREFIX: coolsnowwolf-lede-master
+  TOOLCHAIN_TAG: toolchain
+  RELEASE_BRANCH: main
+  UPLOAD_BIN_DIR: true
+  UPLOAD_FIRMWARE: true
+  Notification: true
+  TZ: Asia/Shanghai
+
+jobs:
+  Build_OpenWrt:
+    runs-on: ubuntu-20.04
+    strategy:
+      fail-fast: false
+      matrix:
+        CONFIG_NAME: [ x86_64, d-team_newifi-d2 ]
+        # Ref: https://github.com/hong0980/openwrt-config
+
+    steps:
+    - name: Free up space
+      uses: easimon/maximize-build-space@master
+      with:
+        root-reserve-mb: 256
+        swap-size-mb: 1024
+        remove-dotnet: 'true'
+        remove-android: 'true'
+        remove-haskell: 'true'
+        overprovision-lvm: 'true'
+
+    - name: Initialization environment
+      env:
+        DEBIAN_FRONTEND: noninteractive
+      run: |
+        # docker image prune -a -f
+        # sudo -E apt-get -y purge azure-cli ghc* zulu* hhvm llvm* firefox google* dotnet* powershell openjdk* mysql* php* android*
+        sudo -E apt-get -qq update
+        sudo -E apt-get -qq install tzdata $(curl -fsSL git.io/depends-ubuntu-2004) jq libfuse-dev rdate
+        sudo -E apt-get -qq autoremove --purge
+        sudo -E apt-get -qq clean
+        sudo ln -fs /usr/share/zoneinfo/$TZ /etc/localtime
+        sudo dpkg-reconfigure -f noninteractive tzdata
+        echo "DEVICE_NAME=${{ matrix.CONFIG_NAME }}" >> $GITHUB_ENV
+        echo "FILE_DATE=$(date +"%Y-%m-%d")" >> $GITHUB_ENV
+        export SOURCE_USER=$(awk -F/ '{print $(NF-1)}' <<< $SOURCE_URL)
+        export SOURCE_NAME=$(awk -F/ '{print $(NF)}' <<< $SOURCE_URL)
+        echo "SOURCE_USER=$SOURCE_USER" >> $GITHUB_ENV
+        echo "SOURCE_NAME=$SOURCE_NAME" >> $GITHUB_ENV
+        echo "TARGET_INFO=$SOURCE_USER-$SOURCE_NAME-$SOURCE_BRANCH" >> $GITHUB_ENV
+
+    - name: Checkout
+      uses: actions/checkout@main
+
+    - name: Check space usage before Compile
+      if: (!cancelled())
+      run: df -hT
+
+    - name: Compare Tools Hash
+      id: tools_hash
+      run: |
+        export CURRENT_TOOLS_HASH=$(curl -fsSL \
+          $GITHUB_API_URL/repos/$SOURCE_USER/$SOURCE_NAME/commits\?sha\=$SOURCE_BRANCH\&path\=tools | jq -r '.[0] | .sha')
+        export CACHE_TOOLS_HASH=$(curl -fSsL \
+          $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/download/$RELEASE_TAG/${TARGET_INFO}-cache-tools-hash.txt 2>/dev/null)
+        if [ -z "$CACHE_TOOLS_HASH" ] || [ "$CURRENT_TOOLS_HASH" == "$CACHE_TOOLS_HASH" ]; then
+          echo "SKIP_TOOLS=true" >> $GITHUB_OUTPUT
+        else
+          echo "CURRENT_TOOLS_HASH = CACHE_TOOLS_HASH"
+        fi
+
+    - name: Compare Toolchain Hash
+      id: toolchain_hash
+      if: steps.tools_hash.outputs.SKIP_TOOLS == 'true' && !cancelled()
+      run: |
+        export CURRENT_TOOLCHAIN_HASH=$(curl -fsSL \
+          $GITHUB_API_URL/repos/$SOURCE_USER/$SOURCE_NAME/commits\?sha\=$SOURCE_BRANCH\&path\=toolchain | jq -r '.[0] | .sha')
+        echo "CURRENT_TOOLCHAIN_HASH=$CURRENT_TOOLCHAIN_HASH" >> $GITHUB_ENV
+        echo "CURRENT_TOOLCHAIN_HASH is $CURRENT_TOOLCHAIN_HASH"
+        export CACHE_TOOLCHAIN_HASH=$(curl -fSsL \
+          $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/download/$RELEASE_TAG/$TARGET_INFO-cache-toolchain-hash.txt 2>/dev/null)
+        echo "CACHE_TOOLCHAIN_HASH is $CACHE_TOOLCHAIN_HASH"
+        if [ -z "$CACHE_TOOLCHAIN_HASH" ] || [ "$CURRENT_TOOLCHAIN_HASH" == "$CACHE_TOOLCHAIN_HASH" ]; then
+          echo "SKIP_TOOLCHAIN=true" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Clone Source Code
+      id: clone
+      if: steps.toolchain_hash.outputs.SKIP_TOOLCHAIN == 'true' && !cancelled()
+      run: |
+        cd $GITHUB_WORKSPACE
+        git clone $CONFIG_URL -b $CONFIG_BRANCH openwrt-config --single-branch
+        cd openwrt-config
+        echo "CONFIGROOT=$PWD" >> $GITHUB_ENV
+        cd $GITHUB_WORKSPACE
+        git clone $SOURCE_URL -b $SOURCE_BRANCH openwrt --single-branch
+        cd openwrt
+        echo "OPENWRTROOT=$PWD" >> $GITHUB_ENV
+
+    - name: Update Feeds
+      id: update_feeds
+      if: steps.clone.conclusion == 'success' && !cancelled()
+      run: |
+        cd $OPENWRTROOT
+        ./scripts/feeds update -a 
+
+    - name: Load custom configuration
+      id: custom
+      if: steps.update_feeds.conclusion == 'success' && !cancelled()
+      run: |
+        cd $OPENWRTROOT
+        chmod +x $CONFIGROOT/*.sh
+        $CONFIGROOT/"$DEVICE_NAME".sh || echo -e ""$DEVICE_NAME".sh not found or has errors"
+
+    - name: Install Feeds
+      id: install_feeds
+      if: steps.custom.conclusion == 'success' && !cancelled()
+      run: |
+        cd $OPENWRTROOT
+        ./scripts/feeds install -a -f
+
+    - name: Prepare config file
+      id: config
+      if: steps.install_feeds.conclusion == 'success' && !cancelled()
+      run: |
+        cd $OPENWRTROOT
+        cp $CONFIGROOT/"$DEVICE_NAME".config .config || exit 1
+        sed -i '/CONFIG_DEVEL/d;/CONFIG_AUTOREMOVE/d;/CONFIG_CCACHE/d;/CONFIG_BUILD_LOG/d' .config
+        echo -e "\nCONFIG_DEVEL=y\nCONFIG_AUTOREMOVE=y\nCONFIG_CCACHE=y\nCONFIG_BUILD_LOG=y\nCONFIG_BUILD_LOG_DIR=\"./logs\"" >> .config
+        export DEVICE_TARGET="$(grep -v ^\# .config | grep _DEVICE_ | cut -d_ -f3)"
+        echo "DEVICE_TARGET=$DEVICE_TARGET" >> $GITHUB_ENV
+        export DEVICE_SUBTARGET="$(grep -v ^\# .config | grep _DEVICE_ | cut -d_ -f4)"
+        echo "DEVICE_SUBTARGET=$DEVICE_SUBTARGET" >> $GITHUB_ENV
+        make defconfig
+        export DEVICE_ARCH="$(grep -v ^\# .config | grep CONFIG_ARCH= | cut -d\" -f2)"
+        echo "DEVICE_ARCH=$DEVICE_ARCH" >> $GITHUB_ENV
+        DEVICE_ARCH_PACKAGES="$(grep -v ^\# .config | grep CONFIG_TARGET_ARCH_PACKAGES= | cut -d\" -f2)"
+        echo "DEVICE_ARCH_PACKAGES=$DEVICE_ARCH_PACKAGES" >> $GITHUB_ENV
+
+    - name: Download package
+      id: download
+      if: steps.config.conclusion == 'success' && !cancelled()
+      run: |
+        cd $OPENWRTROOT
+        make download -j32
+        find dl -size -1024c -exec ls -l {} \;
+        find dl -size -1024c -exec rm -f {} \;
+
+    - name: Fetch Cached Tools
+      id: fetch_tools
+      if: steps.download.conclusion == 'success' && !cancelled()
+      run: |
+        cd $OPENWRTROOT
+        rm -rf build_dir staging_dir
+        wget -c -t=3 https://github.com/hong0980/OpenWrt-Toolchain-Cache/releases/download/$TOOLCHAIN_TAG/$TARGET_INFO-prebuild-tools.tar.xz
+        ./scripts/ext-tools.sh --tools *-prebuild-tools.tar.xz
+        rm *-prebuild-tools.tar.xz
+
+    - name: Modify Files
+      id: modify
+      if: steps.fetch_tools.conclusion == 'success' && !cancelled()
+      run: |
+        cd $OPENWRTROOT
+        mkdir -p staging_dir/target-"$DEVICE_ARCH_PACKAGES"_musl
+        touch staging_dir/target-"$DEVICE_ARCH_PACKAGES"_musl/.prepared
+        mkdir -p staging_dir/target-"$DEVICE_ARCH"-openwrt-linux-musl_musl
+        touch staging_dir/target-"$DEVICE_ARCH"-openwrt-linux-musl_musl/.prepared
+        sed -i '/tools\/Makefile/d' Makefile
+        sed -i 's/ $(tools\/stamp-compile)//;s/ $(tools\/stamp-check)//' Makefile
+
+    - name: Fetch Cached Toolchain
+      id: fetch
+      if: steps.modify.conclusion == 'success' && !cancelled()
+      run: |
+        cd $OPENWRTROOT
+        curl -L --retry 3 https://github.com/hong0980/OpenWrt-Toolchain-Cache/releases/download/$TOOLCHAIN_TAG/$TARGET_INFO-$DEVICE_TARGET-$DEVICE_SUBTARGET-toolchain.tar.bz2 | tar -xj
+        cd $(ls -d */ | grep openwrt-toolchain-) && cd $(ls -d */ | grep toolchain-) && TOOLCHAIN_DIR=$(pwd)
+        cd $OPENWRTROOT
+        echo "toolchain floder is $TOOLCHAIN_DIR"
+        ./scripts/ext-toolchain.sh \
+        --toolchain $TOOLCHAIN_DIR \
+        --overwrite-config \
+        --config $DEVICE_TARGET/$DEVICE_SUBTARGET
+        # rm -rf staging_dir/toolchain-*
+        cp -R $TOOLCHAIN_DIR staging_dir/toolchain-$DEVICE_ARCH-openwrt-linux-musl
+
+#    - name: Compile Tools
+#      id: tools
+#      if: steps.fetch.conclusion == 'success' && !cancelled()
+#      run: |
+#        cd $OPENWRTROOT
+#        echo -e ">>>> $(nproc) thread compile ..."
+#        make tools/compile -j$(nproc)
+
+    - name: Compile Toolchain
+      id: toolchain
+      if: steps.fetch.conclusion == 'success' && !cancelled()
+      run: |
+        cd $OPENWRTROOT
+        echo -e ">>>> $(nproc) thread compile ..."
+        make toolchain/install -j$(nproc) || make toolchain/install -j1 V=s
+
+    - name: Compile Firmware
+      id: compile
+      if: steps.toolchain.conclusion == 'success' && !cancelled()
+      run: |
+        cd $OPENWRTROOT
+        echo -e ">>>> $(nproc) thread compile ..."
+        make -j$(nproc)
+
+    - name: Check Space Usage After Compile
+      if: (!cancelled())
+      run: df -hT
+
+    - name: Upload Error Logs
+      uses: actions/upload-artifact@v3
+      if: steps.compile.conclusion == 'failure' && !cancelled()
+      with:
+        name: Logs_${{ env.DEVICE_NAME }}_${{ env.FILE_DATE }}
+        path: ${{ env.OPENWRTROOT }}/logs
+
+    - name: Upload Bin Directory
+      uses: actions/upload-artifact@v3
+      if: steps.compile.conclusion == 'success' && env.UPLOAD_BIN_DIR == 'true' && !cancelled()
+      with:
+        name: Bin_${{ env.DEVICE_NAME }}_${{ env.FILE_DATE }}
+        path: ${{ env.OPENWRTROOT }}/bin
+
+    - name: Organize Files
+      id: organize
+      if: steps.compile.conclusion == 'success' && env.UPLOAD_FIRMWARE == 'true' && !cancelled()
+      run: |
+        cd $OPENWRTROOT/bin/targets/*/*
+        rm -rf packages
+        rm *.buildinfo *sums
+        echo "FIRMWARE=$PWD" >> $GITHUB_ENV
+
+    - name: Upload Firmware Directory
+      uses: actions/upload-artifact@v3
+      if: steps.organize.conclusion == 'success' && !cancelled()
+      with:
+        name: Firmware_${{ env.DEVICE_NAME }}_${{ env.FILE_DATE }}
+        path: ${{ env.FIRMWARE }}
+
+    - name: Generate Release Tag
+      id: tag
+      if: github.event.inputs.release == 'true' && steps.compile.conclusion == 'success' && !cancelled()
+      run: |
+        echo "release_tag=$FILE_DATE" >> $GITHUB_OUTPUT
+        touch release.txt
+        echo -e "${{ github.event.inputs.release_note }}" > release.txt
+
+    - name: Upload Firmware To Release
+      if: steps.tag.conclusion == 'success' && !cancelled()
+      uses: ncipollo/release-action@v1
+      with:
+        allowUpdates: true
+        token: ${{ secrets.GITHUB_TOKEN }}
+        tag: ${{ steps.tag.outputs.release_tag }}
+        bodyFile: release.txt
+        artifacts: ${{ env.FIRMWARE }}/*
+
+    - name: Remove Old Releases
+      if: (!cancelled())
+      uses: dev-drprasad/delete-older-releases@v0.2.0
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        keep_latest: 15
+        delete_tags: true
+
+#    - name: Notification
+#      if: steps.compile.conclusion == 'success' && env.Notification == 'true' && !cancelled()
+#      run: |
+#        curl -s -X POST https://api.telegram.org/bot${{ secrets.TG_BOT_TOKEN }}/sendMessage -d chat_id=${{ secrets.TG_CHAT_ID }} -d text=""$DEVICE_NAME" compile succeeded" 2>&1 >/dev/null || echo "Telegram notification failed"
+        # curl -s -X POST https://sctapi.ftqq.com/${{ secrets.SCTKEY }}.send?title=""$DEVICE_NAME" compile succeeded" 2>&1 >/dev/null || echo "Wechat notification failed"
