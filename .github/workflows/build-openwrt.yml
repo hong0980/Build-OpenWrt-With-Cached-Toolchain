@@ -20,7 +20,6 @@ env:
   CONFIG_BRANCH: lean-lede
   TOOLCHAIN_PREFIX: coolsnowwolf-lede-master
   TOOLCHAIN_TAG: toolchain_tools_img
-  RELEASE_TAG: toolchain_tools_img
   RELEASE_BRANCH: master
   UPLOAD_BIN_DIR: true
   UPLOAD_FIRMWARE: true
@@ -37,15 +36,8 @@ jobs:
         # Ref: https://github.com/hong0980/openwrt-config
 
     steps:
-    - name: 扩充磁盘
-      uses: easimon/maximize-build-space@master
-      with:
-        root-reserve-mb: 256
-        swap-size-mb: 1024
-        remove-dotnet: 'true'
-        remove-android: 'true'
-        remove-haskell: 'true'
-        overprovision-lvm: 'true'
+    - name: Checkout
+      uses: actions/checkout@main
 
     - name: 初始化环境
       env:
@@ -67,32 +59,60 @@ jobs:
         export SOURCE_NAME=$(awk -F/ '{print $(NF)}' <<< $SOURCE_URL)
         echo "SOURCE_USER=$SOURCE_USER" >> $GITHUB_ENV
         echo "SOURCE_NAME=$SOURCE_NAME" >> $GITHUB_ENV
-        echo "RELEASE_TAG=$SOURCE_USER-$RELEASE_TAG" >> $GITHUB_ENV
         echo "TOOLCHAIN_TAG=$SOURCE_USER-$TOOLCHAIN_TAG" >> $GITHUB_ENV
         echo "TARGET_INFO=$SOURCE_USER-$SOURCE_NAME-$SOURCE_BRANCH" >> $GITHUB_ENV
 
-    - name: Checkout
-      uses: actions/checkout@main
+    - name: 整理磁盘
+      run: |
+        sudo swapoff -a
+        sudo rm -f /mnt/swapfile
+        export ROOT_FREE_KB=$(df --block-size=1024 --output=avail / | tail -1)
+        export ROOT_LOOP_KB=$(expr $ROOT_FREE_KB - 1048576)
+        export ROOT_LOOP_BYTES=$(expr $ROOT_LOOP_KB \* 1024)
+        sudo fallocate -l $ROOT_LOOP_BYTES /root.img
+        export ROOT_LOOP_DEVNAME=$(sudo losetup -Pf --show /root.img)
+        sudo pvcreate -f $ROOT_LOOP_DEVNAME
+        export MNT_FREE_KB=$(df --block-size=1024 --output=avail /mnt | tail -1)
+        export MNT_LOOP_KB=$(expr $MNT_FREE_KB - 102400)
+        export MNT_LOOP_BYTES=$(expr $MNT_LOOP_KB \* 1024)
+        sudo fallocate -l $MNT_LOOP_BYTES /mnt/mnt.img
+        export MNT_LOOP_DEVNAME=$(sudo losetup -Pf --show /mnt/mnt.img)
+        sudo pvcreate -f $MNT_LOOP_DEVNAME
+        sudo vgcreate vgstorage $ROOT_LOOP_DEVNAME $MNT_LOOP_DEVNAME
+        sudo lvcreate -n lvstorage -l 100%FREE vgstorage
+        export LV_DEVNAME=$(sudo lvscan | awk -F "'" '{print $2}')
+        sudo mkfs.btrfs -L combinedisk $LV_DEVNAME
+        sudo mount -o compress=zstd $LV_DEVNAME $GITHUB_WORKSPACE
+        sudo chown -R runner:runner $GITHUB_WORKSPACE
+        mkdir -p $GITHUB_WORKSPACE/tmp
+        chmod 777 $GITHUB_WORKSPACE/tmp
+        sudo cp -rp /tmp/* $GITHUB_WORKSPACE/tmp || true
+        sudo mount -B $GITHUB_WORKSPACE/tmp /tmp
 
     - name: 磁盘信息
-      if: (!cancelled())
-      run: df -hT
+      run: |
+        sudo btrfs filesystem usage $GITHUB_WORKSPACE
+        echo "======================="
+        echo "磁盘使用情况:"
+        echo "======================="
+        df -hT
+        echo "======================="
 
-    - name: 比较Tools
+    - name: 比较 Tools
       id: tools_hash
       run: |
         export CURRENT_TOOLS_HASH=$(curl -fsSL \
           $GITHUB_API_URL/repos/$SOURCE_USER/$SOURCE_NAME/commits\?sha\=$SOURCE_BRANCH\&path\=tools | jq -r '.[0] | .sha')
-        echo "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/download/$RELEASE_TAG/${TARGET_INFO}-cache-tools-hash.txt"
+        echo "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/download/$TOOLCHAIN_TAG/${TARGET_INFO}-cache-tools-hash.txt"
         export CACHE_TOOLS_HASH=$(curl -fSsL \
-          $GITHUB_SERVER_URL/OpenWrt-Toolchain-Cache/releases/download/$RELEASE_TAG/${TARGET_INFO}-cache-tools-hash.txt 2>/dev/null)
+          $GITHUB_SERVER_URL/hong0980/OpenWrt-Toolchain-Cache/releases/download/$TOOLCHAIN_TAG/${TARGET_INFO}-cache-tools-hash.txt 2>/dev/null)
         if [ -z "$CACHE_TOOLS_HASH" ] || [ "$CURRENT_TOOLS_HASH" == "$CACHE_TOOLS_HASH" ]; then
           echo "SKIP_TOOLS=true" >> $GITHUB_OUTPUT
         else
           echo "CURRENT_TOOLS_HASH = CACHE_TOOLS_HASH"
         fi
 
-    - name: 比较Toolchain
+    - name: 比较 Toolchain
       id: toolchain_hash
       if: steps.tools_hash.outputs.SKIP_TOOLS == 'true' && !cancelled()
       run: |
@@ -100,9 +120,9 @@ jobs:
           $GITHUB_API_URL/repos/$SOURCE_USER/$SOURCE_NAME/commits\?sha\=$SOURCE_BRANCH\&path\=toolchain | jq -r '.[0] | .sha')
         echo "CURRENT_TOOLCHAIN_HASH=$CURRENT_TOOLCHAIN_HASH" >> $GITHUB_ENV
         echo "CURRENT_TOOLCHAIN_HASH is $CURRENT_TOOLCHAIN_HASH"
-        echo "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/download/$RELEASE_TAG/$TARGET_INFO-cache-toolchain-hash.txt"
+        echo "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/download/$TOOLCHAIN_TAG/$TARGET_INFO-cache-toolchain-hash.txt"
         export CACHE_TOOLCHAIN_HASH=$(curl -fSsL \
-          $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/download/$RELEASE_TAG/$TARGET_INFO-cache-toolchain-hash.txt 2>/dev/null)
+          $GITHUB_SERVER_URL/hong0980/OpenWrt-Toolchain-Cache/releases/download/$TOOLCHAIN_TAG/${TARGET_INFO}-cache-toolchain-hash.txt 2>/dev/null)
         echo "CACHE_TOOLCHAIN_HASH is $CACHE_TOOLCHAIN_HASH"
         if [ -z "$CACHE_TOOLCHAIN_HASH" ] || [ "$CURRENT_TOOLCHAIN_HASH" == "$CACHE_TOOLCHAIN_HASH" ]; then
           echo "SKIP_TOOLCHAIN=true" >> $GITHUB_OUTPUT
@@ -167,17 +187,17 @@ jobs:
         find dl -size -1024c -exec ls -l {} \;
         find dl -size -1024c -exec rm -f {} \;
 
-    - name: 获取缓存工具
+    - name: 获取 tools
       id: fetch_tools
       if: steps.download.conclusion == 'success' && !cancelled()
       run: |
         cd $OPENWRTROOT
         rm -rf build_dir staging_dir
-        wget -c -t=3 $GITHUB_SERVER_URL/OpenWrt-Toolchain-Cache/releases/download/$TOOLCHAIN_TAG/$TARGET_INFO-prebuild-tools.img
+        wget -c -t=3 $GITHUB_SERVER_URL/hong0980/OpenWrt-Toolchain-Cache/releases/download/$TOOLCHAIN_TAG/$TARGET_INFO-prebuild-tools.img
         ./scripts/ext-tools.sh --tools *-prebuild-tools.img
         rm *-prebuild-tools.img
 
-    - name: Modify Files
+    - name: 修改文件
       id: modify
       if: steps.fetch_tools.conclusion == 'success' && !cancelled()
       run: |
@@ -189,7 +209,7 @@ jobs:
         sed -i '/tools\/Makefile/d' Makefile
         sed -i 's/ $(tools\/stamp-compile)//;s/ $(tools\/stamp-check)//' Makefile
 
-    - name: Fetch Cached Toolchain
+    - name: 获取 Toolchain
       id: fetch
       if: steps.modify.conclusion == 'success' && !cancelled()
       run: |
@@ -213,7 +233,7 @@ jobs:
 #        echo -e ">>>> $(nproc) thread compile ..."
 #        make tools/compile -j$(nproc)
 
-    - name: Compile Toolchain
+    - name: 编译 Toolchain
       id: toolchain
       if: steps.fetch.conclusion == 'success' && !cancelled()
       run: |
@@ -221,33 +241,33 @@ jobs:
         echo -e ">>>> $(nproc) thread compile ..."
         make toolchain/install -j$(nproc) || make toolchain/install -j1 V=s
 
-    - name: Compile Firmware
+    - name: 编译 Firmware
       id: compile
       if: steps.toolchain.conclusion == 'success' && !cancelled()
       run: |
         cd $OPENWRTROOT
         echo -e ">>>> $(nproc) thread compile ..."
-        make -j$(nproc)
+        make -j$(nproc) || make -j1 V=s
 
-    - name: Check Space Usage After Compile
+    - name: 编译后检查空间使用情况
       if: (!cancelled())
       run: df -hT
 
-    - name: Upload Error Logs
+    - name: 上传错误日志
       uses: actions/upload-artifact@v3
       if: steps.compile.conclusion == 'failure' && !cancelled()
       with:
         name: Logs_${{ env.DEVICE_NAME }}_${{ env.FILE_DATE }}
         path: ${{ env.OPENWRTROOT }}/logs
 
-    - name: Upload Bin Directory
+    - name: 上传bin目录
       uses: actions/upload-artifact@v3
       if: steps.compile.conclusion == 'success' && env.UPLOAD_BIN_DIR == 'true' && !cancelled()
       with:
         name: Bin_${{ env.DEVICE_NAME }}_${{ env.FILE_DATE }}
         path: ${{ env.OPENWRTROOT }}/bin
 
-    - name: Organize Files
+    - name: 整理文件
       id: organize
       if: steps.compile.conclusion == 'success' && env.UPLOAD_FIRMWARE == 'true' && !cancelled()
       run: |
@@ -256,7 +276,7 @@ jobs:
         rm *.buildinfo *sums
         echo "FIRMWARE=$PWD" >> $GITHUB_ENV
 
-    - name: Upload Firmware Directory
+    - name: 上传固件目录
       uses: actions/upload-artifact@v3
       if: steps.organize.conclusion == 'success' && !cancelled()
       with:
@@ -271,7 +291,7 @@ jobs:
         touch release.txt
         echo -e "${{ github.event.inputs.release_note }}" > release.txt
 
-    - name: Upload Firmware To Release
+    - name: 上传固件到 Release
       if: steps.tag.conclusion == 'success' && !cancelled()
       uses: ncipollo/release-action@v1
       with:
@@ -281,13 +301,13 @@ jobs:
         bodyFile: release.txt
         artifacts: ${{ env.FIRMWARE }}/*
 
-    - name: Remove Old Releases
+    - name: 删除Releases的旧版本
       if: (!cancelled())
       uses: dev-drprasad/delete-older-releases@v0.2.0
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
-        keep_latest: 15
+        keep_latest: 30
         delete_tags: true
 
 #    - name: Notification
