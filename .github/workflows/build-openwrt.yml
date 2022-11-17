@@ -174,9 +174,9 @@ jobs:
       run: |
         cd $OPENWRTROOT
         rm -rf build_dir staging_dir
-        wget -c -t=3 $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/download/$TOOLCHAIN_TAG/$TARGET_INFO-prebuild-tools.tar.xz
-        ./scripts/ext-tools.sh --tools *-prebuild-tools.tar.xz
-        rm *-prebuild-tools.tar.xz
+        wget -c -t=3 $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/download/$TOOLCHAIN_TAG/$TARGET_INFO-prebuild-tools.img
+        ./scripts/ext-tools.sh --tools *-prebuild-tools.img
+        rm *-prebuild-tools.img
 
     - name: Modify Files
       id: modify
